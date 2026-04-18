@@ -83,11 +83,20 @@ The human role collapses to: one decision to hire, then respond only to exceptio
 - **React 19** — UI
 - **Convex** — database + server functions + real-time sync for the dashboard
 - **OpenAI** (GPT-4 class) — orchestrator LLM
+- **LangGraph** (`@langchain/langgraph`) — workflow engine: dependency graph, retries, **state persistence via checkpointers** so the agent survives restarts and knows which steps it's already completed
+- **Zod** — schemas for tool inputs/outputs and state validation
+- **Vitest** — unit + integration tests (every module ships with tests)
 - **TypeScript** — everywhere
 - **Tailwind CSS v4** — styling
 - **Playwright** (later) — browser automation fallback for integrations without clean APIs
 
 > ⚠️ Next.js 16 has breaking changes vs older versions. Read `node_modules/next/dist/docs/` before writing route/data-fetching code.
+
+## Current build mode: mocks-only
+
+Until real API keys are provisioned, **every external integration is a mock** that simulates realistic latency, success, and typed failure modes. The orchestrator, graph, and tests all run fully end-to-end against mocks. When a real key arrives, the migration is a one-line swap of the mock module for a real HTTP client — the orchestrator and schema don't change.
+
+**Environment today:** `OPENAI_API_KEY` + Convex credentials only. Everything else is faked.
 
 ## Data model (Convex — planned)
 
@@ -110,12 +119,34 @@ state_rules        // per-state compliance config
 
 ## Build phases
 
-- **Phase 0** — Scaffold: Convex schema, OpenAI client, empty dashboard shell
-- **Phase 1** — Orchestrator loop against **mocked** integrations; end-to-end happy path
-- **Phase 2** — Dashboard + exception queue + audit log UI
-- **Phase 3** — Swap mocks for real integrations one at a time (DocuSign first)
+- **Phase 0** — Scaffold: Convex schema, OpenAI client, mocked integration layer, LangGraph orchestrator skeleton, Vitest setup
+- **Phase 1** — End-to-end orchestrator run against mocks — a hire walks through every step, exceptions escalate, audit log fills in
+- **Phase 2** — Dashboard + exception queue + audit log UI wired to Convex live queries
+- **Phase 3** — Swap mocks for real integrations one at a time (DocuSign → Checkr → Gusto → Shippo → Kandji)
 - **Phase 4** — State compliance rules + Slack operator notifications
 - **Phase 5** — Playwright fallback for any integration that turns out to have a messy API
+- **Phase 6** — **Learning & memory loop** (see below)
+
+## Future: learning & memory loop
+
+The agent should get smarter the more hires it processes. Planned, not built yet:
+
+- **Episodic memory** — every hire's full step history and outcomes stored in Convex; retrievable by embedding similarity so the agent can ask "have I seen this situation before?"
+- **Post-hire reflection** — after each hire completes (or fails), an LLM pass summarizes what worked, what didn't, and what the agent should do differently next time. Output: structured "lessons" appended to a playbook.
+- **Playbook consultation** — before the decide step, the agent retrieves relevant playbook entries (by state, by role, by which tool is next) and injects them into the prompt. This is the recursive part — past runs shape future runs.
+- **Failure pattern detection** — when the same exception type hits N times for the same state/tool combo, auto-flag it for a human to turn into a hard rule.
+
+Schema will reserve a `reflections` / `playbook` table from the start so we don't have to migrate later, but no graph nodes call it until Phase 6.
+
+## Testing strategy
+
+Every integration mock, every graph node, and every Convex function ships with Vitest tests. Because all externals are mocked, the test suite is the primary correctness signal until real keys arrive.
+
+```bash
+npm run test          # run once
+npm run test:watch    # watch mode
+npm run test:coverage # coverage report
+```
 
 ## Getting started
 
@@ -145,20 +176,35 @@ Open http://localhost:3000.
 
 ```
 src/
-  app/                   # Next.js routes
-    page.tsx             # Dashboard (hires in flight)
-    hires/[id]/          # Hire detail + step timeline
-    exceptions/          # Operator exception queue
-    api/                 # Server routes (Slack webhooks, integration callbacks)
-  components/            # Shared React components
+  app/                         # Next.js routes
+    page.tsx                   # Dashboard (hires in flight)
+    hires/[id]/                # Hire detail + step timeline
+    exceptions/                # Operator exception queue
+    api/                       # Server routes (Slack webhooks, integration callbacks)
+  components/                  # Shared React components
   lib/
-    agent/               # Orchestrator loop + tool definitions
-    integrations/        # One module per external API (docusign, checkr, gusto, shippo, kandji)
-    compliance/          # Per-state rules
+    agent/
+      graph.ts                 # LangGraph StateGraph definition
+      state.ts                 # Typed shared state schema
+      nodes/                   # One file per graph node (decide, execute, escalate, persist)
+      tools.ts                 # Tool definitions the LLM can call (zod-validated)
+      llm.ts                   # OpenAI client wrapper
+    integrations/              # One module per external API
+      types.ts                 # Shared Integration<Input, Output> interface
+      docusign.ts + .test.ts   # Each integration has its sibling test file
+      checkr.ts + .test.ts
+      gusto.ts + .test.ts
+      shippo.ts + .test.ts
+      kandji.ts + .test.ts
+      mock-utils.ts            # Latency + failure simulation helpers
+    compliance/                # Per-state rules (Phase 4)
+scripts/
+  run-hire.ts                  # CLI: trigger an end-to-end hire against mocks
 convex/
-  schema.ts              # Convex schema
-  hires.ts, steps.ts     # Query + mutation functions
-  audit.ts               # Append-only audit log
+  schema.ts                    # Convex schema
+  hires.ts, steps.ts           # Query + mutation functions
+  exceptions.ts                # Exception queue
+  audit.ts                     # Append-only audit log
 ```
 
 ## Status
