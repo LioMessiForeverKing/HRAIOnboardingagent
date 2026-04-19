@@ -96,12 +96,28 @@ export const runOnboarding = action({
           currentStep,
         });
       },
+      writeThought: async (input) => {
+        await ctx.runMutation(internal.thoughts.writeThought, {
+          hireId: input.hireId as Id<"hires">,
+          turn: input.turn,
+          phase: input.phase,
+          summary: input.summary,
+          detail: input.detail,
+          tool: input.tool,
+          toolArgs: input.toolArgs,
+          toolOutput: input.toolOutput,
+          stepId: input.stepId as Id<"steps"> | undefined,
+        });
+      },
     };
 
     // Step 3: build the graph and run it. The MemorySaver checkpointer
     // lives for the duration of this action call — plenty for a single
     // orchestration. (A persistent checkpointer is future work.)
-    const graph = buildGraph(convexContext);
+    //
+    // Forward the hire's scenario tag (if any) so every mock pins to the
+    // matching deterministic outcome. No tag = probabilistic mocks.
+    const graph = buildGraph(convexContext, { scenario: hire.scenario ?? null });
 
     // Shape the initial state to match what the graph expects.
     const initialState = {

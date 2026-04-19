@@ -76,6 +76,29 @@ export function maybeFail(p: number, err: IntegrationError): void {
 }
 
 // ────────────────────────────────────────────────────────────────
+// One-shot transient fail helper for the "transient_retry" scenario.
+//
+// Each integration registers the tool keys that should fail their FIRST
+// call only. After that first failure the same tool key is marked as
+// "already failed once" and subsequent calls succeed normally — letting
+// the agent's retry path resolve.
+//
+// Stored as a module-level Set so it's stable across handler invocations
+// in a single graph run. Reset between demo runs via `resetTransientFailLog`.
+// ────────────────────────────────────────────────────────────────
+const _transientFailLog = new Set<string>();
+
+export function shouldTransientFailOnce(toolKey: string): boolean {
+  if (_transientFailLog.has(toolKey)) return false;
+  _transientFailLog.add(toolKey);
+  return true;
+}
+
+export function resetTransientFailLog(): void {
+  _transientFailLog.clear();
+}
+
+// ────────────────────────────────────────────────────────────────
 // generateId — lightweight id generator for fake entity ids ("doc_…").
 // Not crypto-secure — it's for mock data.
 // ────────────────────────────────────────────────────────────────

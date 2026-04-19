@@ -20,7 +20,16 @@ import { StateGraph, START, END, MemorySaver } from "@langchain/langgraph";
 
 import { OnboardingState, type OnboardingStateType, type StepRecord } from "./state";
 import { chat, executeToolCall, toolsToOpenAIFormat, decodeToolName } from "./llm";
-import { buildIntegrations, IntegrationError } from "../integrations";
+import { buildIntegrations, IntegrationError, type Scenario } from "../integrations";
+import { resetTransientFailLog } from "../integrations/mock-utils";
+import {
+  describePlan,
+  describeAct,
+  describeObserve,
+  describeRetry,
+  describeEscalate,
+  describeDone,
+} from "./narrator";
 
 // ────────────────────────────────────────────────────────────────
 // System prompt — tells the LLM what it is and how to behave.
@@ -60,6 +69,87 @@ You have access to the full history of tool calls you've already made — do not
 const MAX_RETRIES_PER_TOOL = 3;
 
 // ────────────────────────────────────────────────────────────────
+// detectBusinessEscalation
+//
+// Some tool calls succeed (no thrown error) but return a payload that
+// represents a hard stop: a background check came back "consider", an
+// address is unverifiable, an offer was declined. The system prompt
+// tells the LLM to escalate in those cases, but the LLM tends to just
+// stop calling tools instead — which previously caused the graph to
+// route to `finish` and falsely mark the hire complete.
+//
+// This function inspects a successful tool output and, if it matches
+// any "needs human review" pattern, returns the exception payload.
+// The execute node uses it to short-circuit straight to `escalate`.
+// ────────────────────────────────────────────────────────────────
+function detectBusinessEscalation(
+  toolKey: string,
+  output: unknown,
+): { reason: string; details: string; suggestedAction: string } | null {
+  // Coerce to a generic record so we can read fields without per-tool casts.
+  const o = output as Record<string, unknown> | null | undefined;
+  if (!o || typeof o !== "object") return null;
+
+  switch (toolKey) {
+    case "checkr.get_result": {
+      if (o.status === "consider") {
+        const adverse = Array.isArray(o.adverseActions)
+          ? (o.adverseActions as string[]).join(", ")
+          : "no specific reason returned";
+        return {
+          reason: "checkr_adverse_action",
+          details: `Background check returned 'consider' — adverse findings: ${adverse}. FCRA requires human adjudication before any further action.`,
+          suggestedAction:
+            "Run pre-adverse-action notice + adjudication review in Checkr's dashboard.",
+        };
+      }
+      if (o.status === "suspended") {
+        return {
+          reason: "checkr_suspended",
+          details:
+            "Background check was suspended — Checkr needs additional documents from the candidate.",
+          suggestedAction: "Reach out to the candidate to resolve the document request.",
+        };
+      }
+      return null;
+    }
+    case "shippo.verify_address": {
+      if (o.valid === false) {
+        const issues = Array.isArray(o.issues)
+          ? (o.issues as string[]).join("; ")
+          : "no specific issue returned";
+        return {
+          reason: "address_unverifiable",
+          details: `Shippo couldn't verify the home address: ${issues}.`,
+          suggestedAction: "Confirm the address with the candidate before retrying.",
+        };
+      }
+      return null;
+    }
+    case "docusign.check_status": {
+      if (o.status === "declined") {
+        return {
+          reason: "offer_declined",
+          details: "Candidate declined to sign the offer letter.",
+          suggestedAction:
+            "Reach out to the candidate to understand the decline reason before re-issuing.",
+        };
+      }
+      if (o.status === "voided") {
+        return {
+          reason: "offer_voided",
+          details: "DocuSign envelope was voided before signing completed.",
+          suggestedAction: "Investigate why the envelope was voided; reissue if intentional.",
+        };
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
 // Convex context — injected at graph build time so nodes can persist.
 //
 // We treat Convex as an optional dependency: in tests we pass a fake
@@ -89,6 +179,20 @@ export interface ConvexContext {
     status: "pending" | "in_progress" | "awaiting_human" | "completed" | "failed";
     currentStep?: string;
   }) => Promise<void>;
+  // Optional narration sink — the graph emits a thought per node turn so
+  // the UI can render a live "agent thinking" stream. Implementations
+  // that don't care about narration (e.g. unit tests) can omit this.
+  writeThought?: (args: {
+    hireId: string;
+    turn: number;
+    phase: "plan" | "decide" | "act" | "observe" | "retry" | "escalate" | "done";
+    summary: string;
+    detail?: string;
+    tool?: string;
+    toolArgs?: unknown;
+    toolOutput?: unknown;
+    stepId?: string;
+  }) => Promise<void>;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -98,9 +202,18 @@ export interface ConvexContext {
 // `graph.invoke(initialState, { configurable: { thread_id: hireId } })`.
 // The thread_id is how LangGraph keys checkpoints — one per hire.
 // ────────────────────────────────────────────────────────────────
-export function buildGraph(ctx: ConvexContext) {
+export function buildGraph(
+  ctx: ConvexContext,
+  opts?: { scenario?: Scenario | null },
+) {
   // Build integrations once — this is the tool registry the LLM sees.
-  const { toolMap } = buildIntegrations();
+  // The scenario (if any) is forwarded to every mock so behavior is
+  // deterministic for the duration of this graph build.
+  const scenario = opts?.scenario ?? null;
+  // Reset the per-tool "first call fails once" log so the next run
+  // starts fresh — the transient_retry scenario depends on it.
+  resetTransientFailLog();
+  const { toolMap } = buildIntegrations({ scenario });
   const openaiTools = toolsToOpenAIFormat(toolMap);
 
   // ───────────────────────────────────────────────────────────
@@ -110,14 +223,15 @@ export function buildGraph(ctx: ConvexContext) {
   // Output:  either a pending tool call (added to messages) or done=true
   // ───────────────────────────────────────────────────────────
   async function decide(state: OnboardingStateType) {
+    const isFirstTurn = state.messages.length === 0;
+
     // Build the prompt on first turn. Subsequent turns already have history.
-    const messages =
-      state.messages.length === 0
-        ? [
-            { role: "system" as const, content: SYSTEM_PROMPT },
-            {
-              role: "user" as const,
-              content: `New hire to onboard:
+    const messages = isFirstTurn
+      ? [
+          { role: "system" as const, content: SYSTEM_PROMPT },
+          {
+            role: "user" as const,
+            content: `New hire to onboard:
 - Name: ${state.hire.name}
 - Email: ${state.hire.email}
 - Role: ${state.hire.role}
@@ -128,9 +242,24 @@ export function buildGraph(ctx: ConvexContext) {
 - Our hire id (use this as hireId when calling tools): ${state.hireId}
 
 Use the exact salary above when the tool requires one. Begin with the first step of the dependency order.`,
-            },
-          ]
-        : state.messages;
+          },
+        ]
+      : state.messages;
+
+    // On the very first turn, emit a "planning" thought so the UI has
+    // something to render while the LLM is still formulating its response.
+    // Without this, the operator stares at a blank stream for 1-2 seconds.
+    const turnStart = state.turnCount + 1;
+    if (isFirstTurn) {
+      const plan = describePlan(state.hire);
+      await ctx.writeThought?.({
+        hireId: state.hireId,
+        turn: turnStart,
+        phase: "plan",
+        summary: plan.summary,
+        detail: plan.detail,
+      });
+    }
 
     // Ask the LLM what to do next.
     const response = await chat({
@@ -140,30 +269,65 @@ Use the exact salary above when the tool requires one. Begin with the first step
       temperature: 0.1,
     });
 
-    // Check for the "ALL_STEPS_COMPLETE" sentinel that signals graceful finish.
-    if (!response.tool_calls?.length) {
-      const text = response.content ?? "";
-      // Case-insensitive match — the LLM sometimes adds punctuation.
-      const isComplete = /all[_\s-]*steps[_\s-]*complete/i.test(
-        typeof text === "string" ? text : "",
-      );
+    // Tool call requested → narrate the "act" (which the execute node runs).
+    if (response.tool_calls?.length) {
+      const call = response.tool_calls[0];
+      if (call.type === "function") {
+        const toolKey = decodeToolName(call.function.name);
+        let parsedArgs: unknown = {};
+        try {
+          parsedArgs = JSON.parse(call.function.arguments || "{}");
+        } catch {
+          // If the LLM produced junk JSON the execute node will throw;
+          // we still want to record what it tried to call.
+        }
+        const act = describeAct(toolKey, parsedArgs);
+        await ctx.writeThought?.({
+          hireId: state.hireId,
+          turn: turnStart + (isFirstTurn ? 1 : 0),
+          phase: "act",
+          summary: act.summary,
+          detail:
+            typeof response.content === "string" && response.content.trim()
+              ? `${act.detail}\n\nLLM said: ${response.content.trim()}`
+              : act.detail,
+          tool: toolKey,
+          toolArgs: parsedArgs,
+        });
+      }
+
       return {
-        // Always append the assistant message so future turns see the history.
-        messages: state.messages.length === 0
-          ? [...messages, response]
-          : [response],
-        // If the LLM declared completion, mark done. Otherwise it's confused
-        // and we'll loop back — but track that for escalation heuristics.
-        done: isComplete,
+        messages: isFirstTurn ? [...messages, response] : [response],
+        turnCount: turnStart + (isFirstTurn ? 1 : 0),
       };
     }
 
-    // Tool call requested. Pass the assistant message forward; the execute
-    // node will pick up the tool_calls array.
+    // No tool call — either the LLM declared completion, or it stalled.
+    const text = response.content ?? "";
+    const textStr = typeof text === "string" ? text : "";
+    const isComplete = /all[_\s-]*steps[_\s-]*complete/i.test(textStr);
+
+    // If the LLM didn't say the magic phrase AND didn't request a tool,
+    // it's giving up early. Surface that as an exception so the operator
+    // can see why instead of the graph falsely marking the hire complete.
+    const stallException =
+      !isComplete
+        ? {
+            reason: "agent_stalled",
+            details:
+              `The agent stopped without completing every required step and without declaring "ALL_STEPS_COMPLETE". ` +
+              `Last assistant text: ${textStr ? JSON.stringify(textStr.slice(0, 500)) : "(empty)"}`,
+            severity: "high" as const,
+            suggestedAction:
+              "Review the agent transcript to see which step caused it to stop, then resume manually or rerun once the blocker is resolved.",
+          }
+        : null;
+
     return {
-      messages: state.messages.length === 0
-        ? [...messages, response]
-        : [response],
+      messages: isFirstTurn ? [...messages, response] : [response],
+      done: isComplete,
+      turnCount: turnStart + (isFirstTurn ? 1 : 0),
+      pendingException: stallException,
     };
   }
 
@@ -218,12 +382,20 @@ Use the exact salary above when the tool requires one. Begin with the first step
       // Persist success.
       await ctx.completeStep({ stepId, output });
 
-      // Append a `tool` role message so the LLM sees the result on next decide.
-      const toolMessage = {
-        role: "tool" as const,
-        tool_call_id: call.id,
-        content: JSON.stringify(output),
-      };
+      // Narrate the observation — what we learned from the tool result
+      // and what we'll do next. This is what makes the stream feel alive.
+      const obsTurn = state.turnCount + 1;
+      const obs = describeObserve(toolKey, output);
+      await ctx.writeThought?.({
+        hireId: state.hireId,
+        turn: obsTurn,
+        phase: "observe",
+        summary: obs.summary,
+        detail: obs.detail,
+        tool: toolKey,
+        toolOutput: output,
+        stepId,
+      });
 
       const record: StepRecord = {
         tool: toolKey,
@@ -233,11 +405,42 @@ Use the exact salary above when the tool requires one. Begin with the first step
         at: Date.now(),
       };
 
+      // Some tool results are *successful* (no thrown error) but represent
+      // business-rule outcomes the agent isn't allowed to auto-progress
+      // past — Checkr "consider" / "suspended", Shippo invalid address,
+      // DocuSign "declined" / "voided". Detect those here and route to
+      // escalate, instead of trusting the LLM to remember the rule.
+      // Without this guard the LLM would simply stop calling tools and the
+      // graph would mis-route to `finish`, marking the hire "completed"
+      // when it actually needs a human.
+      const businessEscalation = detectBusinessEscalation(toolKey, output);
+      if (businessEscalation) {
+        return {
+          completedSteps: [record],
+          pendingException: {
+            reason: businessEscalation.reason,
+            details: businessEscalation.details,
+            severity: "high" as const,
+            suggestedAction: businessEscalation.suggestedAction,
+            stepId,
+          },
+          turnCount: obsTurn,
+        };
+      }
+
+      // Append a `tool` role message so the LLM sees the result on next decide.
+      const toolMessage = {
+        role: "tool" as const,
+        tool_call_id: call.id,
+        content: JSON.stringify(output),
+      };
+
       return {
         messages: [toolMessage],
         completedSteps: [record],
         // Reset this tool's retry counter — a success clears past failures.
         retryCounts: { [toolKey]: 0 },
+        turnCount: obsTurn,
       };
     } catch (err) {
       // Distinguish retryable from fatal.
@@ -251,6 +454,20 @@ Use the exact salary above when the tool requires one. Begin with the first step
           stepId,
           error: { code: integrationErr?.code, message: (err as Error).message },
           escalate: false,
+        });
+
+        // Narrate the retry — operator sees that the agent noticed the blip
+        // and is working around it rather than silently stalling.
+        const retryTurn = state.turnCount + 1;
+        const retry = describeRetry(toolKey, currentRetries, (err as Error).message);
+        await ctx.writeThought?.({
+          hireId: state.hireId,
+          turn: retryTurn,
+          phase: "retry",
+          summary: retry.summary,
+          detail: retry.detail,
+          tool: toolKey,
+          stepId,
         });
 
         // Feed the error back to the LLM as a tool message so it can decide
@@ -270,6 +487,7 @@ Use the exact salary above when the tool requires one. Begin with the first step
         return {
           messages: [toolMessage],
           retryCounts: { [toolKey]: currentRetries + 1 },
+          turnCount: retryTurn,
         };
       }
 
@@ -323,7 +541,22 @@ Use the exact salary above when the tool requires one. Begin with the first step
       severity: ex.severity,
     });
 
-    return { done: true };
+    // Narrate the hand-off — it's the last thing the agent does in the
+    // exception path so the stream ends with a clear reason for stopping.
+    const esTurn = state.turnCount + 1;
+    const es = describeEscalate(ex.reason, ex.details);
+    await ctx.writeThought?.({
+      hireId: state.hireId,
+      turn: esTurn,
+      phase: "escalate",
+      summary: es.summary,
+      detail: ex.suggestedAction
+        ? `${es.detail}\n\nSuggested action: ${ex.suggestedAction}`
+        : es.detail,
+      stepId: ex.stepId,
+    });
+
+    return { done: true, turnCount: esTurn };
   }
 
   // ───────────────────────────────────────────────────────────
@@ -335,21 +568,39 @@ Use the exact salary above when the tool requires one. Begin with the first step
       status: "completed",
       currentStep: undefined,
     });
-    return { done: true };
+
+    // Final narration — a clean "we're done" line closes the stream.
+    const finTurn = state.turnCount + 1;
+    const d = describeDone(state.completedSteps.length);
+    await ctx.writeThought?.({
+      hireId: state.hireId,
+      turn: finTurn,
+      phase: "done",
+      summary: d.summary,
+      detail: d.detail,
+    });
+
+    return { done: true, turnCount: finTurn };
   }
 
   // ───────────────────────────────────────────────────────────
   // Router from decide — branch on whether there's a pending tool call,
   // a pending exception, or completion.
   // ───────────────────────────────────────────────────────────
-  function routeFromDecide(state: OnboardingStateType): "execute" | "finish" {
+  function routeFromDecide(state: OnboardingStateType): "execute" | "finish" | "escalate" {
     const last = state.messages[state.messages.length - 1];
     // Tool call requested → execute branch.
     if (last?.role === "assistant" && "tool_calls" in last && last.tool_calls?.length) {
       return "execute";
     }
-    // Otherwise we're done (LLM declared completion).
-    return "finish";
+    // No tool call. If the LLM explicitly declared completion (`done` flag
+    // set in decide), graduate to finish. Otherwise the LLM stopped early
+    // — that's a stall we should escalate, NOT silently mark complete.
+    // (Without this, an LLM that gives up after seeing a "consider" result
+    // would route to `finish` and the operator would think the hire was
+    // fully onboarded when in fact half the chain never ran.)
+    if (state.done) return "finish";
+    return "escalate";
   }
 
   // Router from execute — if a tool raised an escalation, jump to escalate.
@@ -371,6 +622,7 @@ Use the exact salary above when the tool requires one. Begin with the first step
     .addConditionalEdges("decide", routeFromDecide, {
       execute: "execute",
       finish: "finish",
+      escalate: "escalate",
     })
     .addConditionalEdges("execute", routeFromExecute, {
       decide: "decide",

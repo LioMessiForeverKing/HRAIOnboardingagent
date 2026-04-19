@@ -98,6 +98,19 @@ export function makeConsoleContext(): ConvexContext & {
       });
     },
 
+    async writeThought(args) {
+      // Thoughts are the "agent is thinking" narration. In the terminal
+      // demo we print them with a distinctive marker so the reasoning
+      // stream is obviously separate from raw step events.
+      log({
+        kind: "thought",
+        turn: args.turn,
+        phase: args.phase,
+        summary: args.summary,
+        detail: args.detail,
+      });
+    },
+
     getTranscript() {
       return transcript;
     },
@@ -124,6 +137,13 @@ export type ConsoleEvent =
       hireId: string;
       status: string;
       currentStep?: string;
+    }
+  | {
+      kind: "thought";
+      turn: number;
+      phase: string;
+      summary: string;
+      detail?: string;
     };
 
 // ────────────────────────────────────────────────────────────────
@@ -145,5 +165,9 @@ function format(event: ConsoleEvent): string {
       return `${c.red("!!!")} ${c.bold(`EXCEPTION RAISED`)} ${c.red(event.reason)} ${c.dim(`(${event.severity})`)}\n    ${event.details}`;
     case "hire_status":
       return `${c.dim("·")} ${c.bold("hire")} ${event.hireId} → ${c.cyan(event.status)}${event.currentStep ? c.dim(` (step: ${event.currentStep})`) : ""}`;
+    case "thought":
+      // Agent thoughts get their own prefix so they're visually distinct
+      // from step lifecycle events.
+      return `${c.dim(`t${event.turn}`)} ${c.yellow("[thought]")} ${c.bold(event.phase)} ${event.summary}${event.detail ? c.dim(`\n    ${event.detail}`) : ""}`;
   }
 }

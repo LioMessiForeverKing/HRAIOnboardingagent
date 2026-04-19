@@ -13,6 +13,7 @@ import Link from "next/link";
 import { useQuery } from "convex/react";
 import { api } from "../../../../convex/_generated/api";
 import type { Doc, Id } from "../../../../convex/_generated/dataModel";
+import { AgentStream } from "./AgentStream";
 
 // Next.js 16: dynamic route params arrive as a Promise that must be
 // unwrapped with `React.use()` in a client component.
@@ -71,6 +72,17 @@ export default function HireDetailPage({ params }: { params: Params }) {
           <span>
             <HireStatusLabel status={hire.status} />
           </span>
+          {/* Scenario badge — only present when this hire was started with
+              a pinned test scenario. Tells the operator at a glance which
+              mock path the agent is following. */}
+          {hire.scenario && (
+            <>
+              <span>·</span>
+              <span className="rounded-full border border-purple-300 bg-purple-50 px-2 py-0.5 font-mono text-xs text-purple-800 dark:border-purple-900 dark:bg-purple-950/40 dark:text-purple-300">
+                scenario: {hire.scenario}
+              </span>
+            </>
+          )}
         </div>
       </header>
 
@@ -108,8 +120,16 @@ export default function HireDetailPage({ params }: { params: Params }) {
         </section>
       )}
 
+      {/* Agent reasoning stream — the headline of this page. Lives above
+          the step timeline because it's the primary thing the operator
+          wants to watch while a hire is in flight. */}
+      <div className="mb-8">
+        <AgentStream hireId={hireId} hireStatus={hire.status} />
+      </div>
+
       <div className="grid gap-8 md:grid-cols-3">
-        {/* Step timeline — left 2/3. */}
+        {/* Step timeline — left 2/3. A lower-level, mechanical view
+            that pairs with the narrative stream above. */}
         <section className="md:col-span-2">
           <h2 className="mb-4 text-sm font-medium uppercase tracking-wide text-zinc-500">
             Step timeline

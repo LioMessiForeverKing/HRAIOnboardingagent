@@ -63,6 +63,21 @@ export default defineSchema({
     // Free-form cursor pointing at the currently-active step key (e.g. "checkr").
     // Cheap way to render the dashboard without joining `steps`.
     currentStep: v.optional(v.string()),
+    // Optional test-scenario tag — when set, the orchestrator pins
+    // every mock to a deterministic outcome instead of rolling dice.
+    // Lets ops manually exercise each happy / failure path on demand.
+    // Mirrors the `Scenario` union in src/lib/integrations/types.ts.
+    scenario: v.optional(
+      v.union(
+        v.literal("all_success"),
+        v.literal("checkr_consider"),
+        v.literal("checkr_suspended"),
+        v.literal("address_invalid"),
+        v.literal("docusign_declined"),
+        v.literal("transient_retry"),
+        v.literal("shippo_label_failed"),
+      ),
+    ),
     // Creation + last-update timestamps (ms since epoch).
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -179,6 +194,58 @@ export default defineSchema({
     .index("by_hire", ["hireId"])
     // Global activity feed across all hires.
     .index("by_time", ["timestamp"]),
+
+  // ───────────────────────────────────────────────────────────
+  // agent_thoughts — narrated stream of the agent's decisions.
+  //
+  // This is what makes the UI feel *agentic*. Every time the LLM picks a
+  // tool, waits on a poll, observes a result, retries, or escalates, we
+  // append a thought here. The hire detail page subscribes via live query
+  // so the operator literally watches the agent think in real time.
+  //
+  // Separate from `audit_log` on purpose: the audit log is compliance-grade
+  // "what happened"; thoughts are human-readable "why the agent chose this".
+  // Keeping them apart lets us rewrite narration without invalidating audit.
+  // ───────────────────────────────────────────────────────────
+  agent_thoughts: defineTable({
+    // Which hire this thought belongs to. Always set.
+    hireId: v.id("hires"),
+    // Monotonic turn index per hire — cheap ordering without relying on ts.
+    turn: v.number(),
+    // Lifecycle phase — drives icon + color in the UI.
+    //   plan      first-turn planning before any tool call
+    //   decide    choosing the next tool
+    //   act       invoking a tool (input visible)
+    //   observe   processing tool output
+    //   retry     transient failure, backing off
+    //   escalate  handing off to a human
+    //   done      workflow complete
+    phase: v.union(
+      v.literal("plan"),
+      v.literal("decide"),
+      v.literal("act"),
+      v.literal("observe"),
+      v.literal("retry"),
+      v.literal("escalate"),
+      v.literal("done")
+    ),
+    // One-line summary that scans well in the stream.
+    summary: v.string(),
+    // Optional longer narration — the "why" behind the choice.
+    detail: v.optional(v.string()),
+    // Which tool this thought concerns (dot-notation: "docusign.send_offer").
+    tool: v.optional(v.string()),
+    // Tool arguments the agent chose — displayed as JSON in an expander.
+    toolArgs: v.optional(v.any()),
+    // Tool output preview — shown after an observe thought.
+    toolOutput: v.optional(v.any()),
+    // Link back to the step row so the UI can cross-reference.
+    stepId: v.optional(v.id("steps")),
+    // Event time.
+    createdAt: v.number(),
+  })
+    // Primary access pattern: "all thoughts for this hire, in order".
+    .index("by_hire", ["hireId"]),
 
   // ───────────────────────────────────────────────────────────
   // reflections — RESERVED for Phase 6 learning loop.

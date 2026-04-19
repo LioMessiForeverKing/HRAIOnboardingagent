@@ -15,6 +15,30 @@ import { useMutation, useAction } from "convex/react";
 import { useRouter } from "next/navigation";
 import { api } from "../../../convex/_generated/api";
 
+// Mirrors the Scenario union from src/lib/integrations/types.ts.
+// Kept narrow so the createHire mutation accepts only valid values.
+type ScenarioName =
+  | "all_success"
+  | "checkr_consider"
+  | "checkr_suspended"
+  | "address_invalid"
+  | "docusign_declined"
+  | "transient_retry"
+  | "shippo_label_failed";
+
+// Scenario catalog — drives the picker dropdown. One row per supported
+// path so the operator can read what each one will do before running.
+const SCENARIOS: Array<{ value: ScenarioName | ""; label: string; detail: string }> = [
+  { value: "", label: "Default (random)", detail: "Mocks roll dice — ~10% adverse Checkr, ~5% bad address, occasional transient errors." },
+  { value: "all_success", label: "All success", detail: "Every step clears, no retries. The full 10-tool happy path end to end." },
+  { value: "checkr_consider", label: "Checkr: consider (FCRA escalation)", detail: "Background check returns adverse findings. Agent stops and escalates per FCRA." },
+  { value: "checkr_suspended", label: "Checkr: suspended", detail: "Checkr needs more documents from the candidate — agent escalates." },
+  { value: "address_invalid", label: "Shippo: invalid address", detail: "Verify_address returns valid=false. Agent escalates before buying a label." },
+  { value: "docusign_declined", label: "DocuSign: candidate declined", detail: "Envelope status returns 'declined'. Agent escalates." },
+  { value: "transient_retry", label: "Transient retries", detail: "First call to several tools throws a 503; agent retries and succeeds." },
+  { value: "shippo_label_failed", label: "Shippo: label purchase failed", detail: "Carrier rejects the label (non-retryable). Agent escalates." },
+];
+
 export default function NewHirePage() {
   const router = useRouter();
 
@@ -38,6 +62,10 @@ export default function NewHirePage() {
   const [city, setCity] = useState("Austin");
   const [zip, setZip] = useState("78701");
 
+  // Scenario — pins mock behavior so the operator can manually exercise
+  // each path. Empty string = no override (probabilistic mocks).
+  const [scenario, setScenario] = useState<string>("");
+
   // UI flags.
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +87,9 @@ export default function NewHirePage() {
         startDate,
         salary,
         address: { street1, city, state, zip },
+        // Only forward scenario when the operator actually picked one;
+        // empty string means "let the mocks roll dice as usual".
+        scenario: scenario ? (scenario as ScenarioName) : undefined,
       });
 
       // Step 2: kick off the orchestrator. We intentionally DO NOT await
@@ -149,6 +180,34 @@ export default function NewHirePage() {
             />
           </Field>
         </div>
+
+        {/* Scenario picker — controls which mock outcomes the agent will hit.
+            Use this to manually exercise success vs. each failure path. */}
+        <fieldset className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+          <legend className="px-1 text-xs uppercase tracking-wide text-zinc-500">
+            Test scenario
+          </legend>
+          <div className="mt-2 space-y-3">
+            <Field label="Pin agent behavior to a specific path">
+              <select
+                value={scenario}
+                onChange={(e) => setScenario(e.target.value)}
+                className={inputClass}
+              >
+                {SCENARIOS.map((s) => (
+                  <option key={s.value || "default"} value={s.value}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {/* Live description of the chosen scenario so the operator
+                knows exactly what the agent will do before they submit. */}
+            <p className="text-xs leading-relaxed text-zinc-500">
+              {SCENARIOS.find((s) => s.value === scenario)?.detail}
+            </p>
+          </div>
+        </fieldset>
 
         {/* Address block — used by Shippo for the laptop shipment. */}
         <fieldset className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">

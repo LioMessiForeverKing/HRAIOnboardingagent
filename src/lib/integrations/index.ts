@@ -11,27 +11,31 @@ import { createCheckrIntegration } from "./checkr";
 import { createGustoIntegration } from "./gusto";
 import { createShippoIntegration } from "./shippo";
 import { createKandjiIntegration } from "./kandji";
-import type { Integration, IntegrationAction } from "./types";
+import type { Integration, IntegrationAction, IntegrationOpts } from "./types";
 
 // ────────────────────────────────────────────────────────────────
 // buildIntegrations — constructs every integration and returns:
 //   - the typed `Integration` list for introspection
 //   - a flat `toolMap` of "<tool>.<action>" → IntegrationAction
 //
-// Called once on agent startup. Constructors may throw if real creds are
+// Called once per graph build. Constructors may throw if real creds are
 // present but not yet supported (Phase 3+).
+//
+// `opts.scenario` is forwarded to every integration so the demo can pin
+// behavior to a specific test path (consider/suspended/declined/etc.)
+// instead of relying on RNG.
 // ────────────────────────────────────────────────────────────────
-export function buildIntegrations(): {
+export function buildIntegrations(opts?: IntegrationOpts): {
   integrations: Integration[];
   toolMap: Record<string, IntegrationAction & { tool: string }>;
 } {
   // Instantiate each integration. Today they're all mocks.
   const integrations: Integration[] = [
-    createDocusignIntegration(),
-    createCheckrIntegration(),
-    createGustoIntegration(),
-    createShippoIntegration(),
-    createKandjiIntegration(),
+    createDocusignIntegration(opts),
+    createCheckrIntegration(opts),
+    createGustoIntegration(opts),
+    createShippoIntegration(opts),
+    createKandjiIntegration(opts),
   ];
 
   // Flatten to a single lookup map. Keys use dot notation so the agent's
@@ -50,5 +54,5 @@ export function buildIntegrations(): {
 }
 
 // Re-export key types so callers only need to import from this barrel file.
-export type { Integration, IntegrationAction } from "./types";
-export { IntegrationError } from "./types";
+export type { Integration, IntegrationAction, IntegrationOpts, Scenario } from "./types";
+export { IntegrationError, ALL_SCENARIOS } from "./types";

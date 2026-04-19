@@ -8,20 +8,23 @@
 
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ConvexClientProvider } from "./ConvexClientProvider";
 
-// Geist fonts — inherited from the create-next-app template.
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+// We previously imported Geist via `next/font/google`, which fetches the
+// woff2 from fonts.gstatic.com on first compile. On networks that are
+// slow or block Google Fonts that fetch hangs the dev server before it
+// can serve any page (the bundler waits for the font promise to resolve).
+// Switching to a system font stack via CSS variables keeps the visual
+// design close (San Francisco on macOS) and removes the network call
+// from the critical path. To restore Geist locally without the network
+// hop: `pnpm add geist` and import from "geist/font/sans" / "geist/font/mono".
+const fontVars = {
+  "--font-geist-sans":
+    "ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+  "--font-geist-mono":
+    "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+} as React.CSSProperties;
 
 // Page metadata for the browser tab + social previews.
 export const metadata: Metadata = {
@@ -38,7 +41,8 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className="h-full antialiased"
+      style={fontVars}
     >
       <body className="min-h-full flex flex-col bg-zinc-50 dark:bg-black text-black dark:text-zinc-50">
         {/* Convex provider — must wrap every page that uses live queries. */}
@@ -61,6 +65,12 @@ export default function RootLayout({
                   className="text-zinc-600 hover:text-black dark:text-zinc-400 dark:hover:text-zinc-50"
                 >
                   Exceptions
+                </Link>
+                <Link
+                  href="/info"
+                  className="text-zinc-600 hover:text-black dark:text-zinc-400 dark:hover:text-zinc-50"
+                >
+                  Info
                 </Link>
                 <Link
                   href="/new"

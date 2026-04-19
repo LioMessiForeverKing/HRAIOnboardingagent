@@ -110,6 +110,15 @@ export const OnboardingState = Annotation.Root({
     default: () => false,
     reducer: (_prev, next) => next,
   }),
+
+  // Turn counter — bumped by each node that writes a narrated thought.
+  // Used as a monotonic sort key in the UI stream so the operator sees
+  // thoughts in the exact order they happened, not reordered by ts.
+  // Reducer replaces — each node returns the next value explicitly.
+  turnCount: Annotation<number>({
+    default: () => 0,
+    reducer: (_prev, next) => next,
+  }),
 });
 
 // Type alias for the inferred state shape — used by node signatures.

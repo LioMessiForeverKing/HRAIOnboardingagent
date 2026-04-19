@@ -80,6 +80,53 @@ export interface Integration {
 }
 
 // ────────────────────────────────────────────────────────────────
+// Scenario — deterministic mock-behavior selector.
+//
+// The mocks normally roll dice (10% adverse background, 5% bad address,
+// etc.) so demo runs feel real. For testing every error path we need a
+// way to *pin* a specific outcome. Each integration's mock checks the
+// scenario before falling back to RNG.
+//
+// Add new scenarios here as we want new test paths.
+// ────────────────────────────────────────────────────────────────
+export type Scenario =
+  // Force every random outcome to the happy result. No transients,
+  // no hard fails, no flagged background, no invalid addresses.
+  | "all_success"
+  // Checkr returns "consider" — adverse findings, FCRA escalation.
+  | "checkr_consider"
+  // Checkr returns "suspended" — missing documents from candidate.
+  | "checkr_suspended"
+  // Shippo address validation fails — escalate before buying a label.
+  | "address_invalid"
+  // DocuSign envelope returns "declined" — candidate said no.
+  | "docusign_declined"
+  // First call to each polling tool returns a transient 5xx; the agent
+  // retries within budget and the second call succeeds. Demonstrates
+  // retry resilience.
+  | "transient_retry"
+  // Shippo create_shipment hard-fails (carrier rejected the label).
+  | "shippo_label_failed";
+
+// Convenient set of all valid values for runtime checks.
+export const ALL_SCENARIOS: ReadonlyArray<Scenario> = [
+  "all_success",
+  "checkr_consider",
+  "checkr_suspended",
+  "address_invalid",
+  "docusign_declined",
+  "transient_retry",
+  "shippo_label_failed",
+];
+
+// Options every `createXxxIntegration` factory accepts. Kept generic so
+// adding fields later (e.g. per-tool latency overrides) doesn't ripple
+// through every signature.
+export interface IntegrationOpts {
+  scenario?: Scenario | null;
+}
+
+// ────────────────────────────────────────────────────────────────
 // Helper: decide at module-load whether to use mocks.
 //
 // Priority (highest first):

@@ -14,6 +14,7 @@ import type * as audit from "../audit.js";
 import type * as exceptions from "../exceptions.js";
 import type * as hires from "../hires.js";
 import type * as steps from "../steps.js";
+import type * as thoughts from "../thoughts.js";
 
 import type {
   ApiFromModules,
@@ -28,6 +29,7 @@ declare const fullApi: ApiFromModules<{
   exceptions: typeof exceptions;
   hires: typeof hires;
   steps: typeof steps;
+  thoughts: typeof thoughts;
 }>;
 
 /**

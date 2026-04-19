@@ -16,6 +16,19 @@ import { v } from "convex/values";
 // createHire — public mutation. Called from the "New Hire" form.
 // Starts a workflow; the orchestrator picks it up immediately afterward.
 // ────────────────────────────────────────────────────────────────
+// Validator shared between the hires schema and createHire input. Kept
+// here as a const so updates only need to land in two places (schema +
+// here) — matching the literal union in src/lib/integrations/types.ts.
+const scenarioValidator = v.union(
+  v.literal("all_success"),
+  v.literal("checkr_consider"),
+  v.literal("checkr_suspended"),
+  v.literal("address_invalid"),
+  v.literal("docusign_declined"),
+  v.literal("transient_retry"),
+  v.literal("shippo_label_failed"),
+);
+
 export const createHire = mutation({
   args: {
     name: v.string(),
@@ -31,6 +44,10 @@ export const createHire = mutation({
     }),
     salary: v.number(),
     startDate: v.string(),
+    // Optional scenario — pins mock behavior so the operator can exercise
+    // a specific success/failure path on demand. Defaults to "no override"
+    // (probabilistic mocks).
+    scenario: v.optional(scenarioValidator),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -47,6 +64,7 @@ export const createHire = mutation({
       startDate: args.startDate,
       status: "pending",
       currentStep: undefined,
+      scenario: args.scenario,
       createdAt: now,
       updatedAt: now,
     });
@@ -57,7 +75,13 @@ export const createHire = mutation({
       hireId,
       actor: "system",
       event: "hire_created",
-      payload: { name: args.name, email: args.email, role: args.role, state: args.state },
+      payload: {
+        name: args.name,
+        email: args.email,
+        role: args.role,
+        state: args.state,
+        scenario: args.scenario,
+      },
       timestamp: now,
     });
 

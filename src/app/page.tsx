@@ -60,6 +60,28 @@ export default function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
+      {/* Info card — surfaces the "what is this thing actually doing?"
+          deep-dive page. Pinned to the top so first-time viewers find it
+          before they get into the live data. */}
+      <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold">How the agent works</h2>
+            <p className="mt-1 max-w-prose text-sm text-zinc-600 dark:text-zinc-400">
+              The orchestration loop, every external API the agent calls,
+              the real request/response payloads, and the rules it uses to
+              decide between proceeding, retrying, and escalating.
+            </p>
+          </div>
+          <Link
+            href="/info"
+            className="shrink-0 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+          >
+            Open info →
+          </Link>
+        </div>
+      </section>
+
       {/* Stats row — counts update live as the agent works. */}
       <section className="mb-10 grid grid-cols-2 gap-4 sm:grid-cols-4">
         <StatCard
@@ -115,7 +137,8 @@ export default function DashboardPage() {
         {hires && hires.length === 0 && (
           <div className="rounded-lg border border-dashed border-zinc-300 p-8 text-center dark:border-zinc-700">
             <p className="text-sm text-zinc-600 dark:text-zinc-400">
-              No hires yet. Create one to see the agent in action.
+              No hires yet. Create one to watch the agent plan, call tools,
+              and respond to results in real time.
             </p>
             <Link
               href="/new"
